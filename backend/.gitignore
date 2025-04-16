@@ -1,0 +1,10 @@
+venv/
+
+myenv/
+.venv/  # Keep this for consistency with common conventions
+uploads/*
+config/.env
+db/*.db
+*.pyc
+__pycache__/
+*.log

@@ -1,0 +1,9 @@
+flask
+flask-socketio
+opencv-python
+tensorflow
+numpy
+keras
+python-dotenv
+werkzeug
+twilio 
