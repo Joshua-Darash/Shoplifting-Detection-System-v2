@@ -3,7 +3,7 @@ import React, { useEffect, useState } from 'react';
 import { AppProvider, useApp } from '@/context/AppContext';
 import { ThemeProvider } from '@/context/ThemeContext';
 import Header from '@/components/Header';
-import VideoDisplay from '@/components/video/VideoDisplay';
+import VideoDisplay from '@/components/VideoDisplay';
 import SettingsPanel from '@/components/SettingsPanel';
 import AlertsLog from '@/components/AlertsLog';
 import detectionService from '@/services/detectionService';

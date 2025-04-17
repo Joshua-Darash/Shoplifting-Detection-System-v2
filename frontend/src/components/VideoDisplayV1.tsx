@@ -1,71 +1,87 @@
-import React, { useRef, useState, useEffect } from 'react';
-import { useApp } from '@/context/AppContext';
-import { toast } from "@/components/ui/use-toast";
+
+import React, { useRef, useEffect, useState } from 'react';
+import { useApp } from '../context/AppContext';
 import { Button } from '@/components/ui/button';
-import { Camera, UploadCloud, Play, Fullscreen, PictureInPicture, ArrowDown, X, Maximize } from 'lucide-react';
+import { Camera, Video, UploadCloud, Play, Search, ArrowDown, Fullscreen, PictureInPicture } from 'lucide-react';
+import { toast } from "@/components/ui/use-toast";
 
 const VideoDisplay = () => {
   const { 
     videoSource, 
     setVideoSource, 
+    isDetectionActive, 
+    setDetectionActive, 
     takeSnapshot, 
     snapshotDataUrl,
-    status,
-    isDetectionActive,
-    setDetectionActive
+    status
   } = useApp();
   
   const videoRef = useRef<HTMLVideoElement>(null);
-  const fileInputRef = useRef<HTMLInputElement>(null);
   const [showSnapshotPreview, setShowSnapshotPreview] = useState(false);
+  const fileInputRef = useRef<HTMLInputElement>(null);
   const [isVideoLoading, setIsVideoLoading] = useState(false);
-  const [isTransitioning, setIsTransitioning] = useState(false);
-  const [sourceType, setSourceType] = useState<string | null>(null); // New state for intended source
-
-  // Utility to reset video element state
-  const resetVideoElement = () => {
-    if (videoRef.current) {
-      if (videoRef.current.srcObject) {
-        const stream = videoRef.current.srcObject as MediaStream;
-        stream.getTracks().forEach(track => track.stop());
-        videoRef.current.srcObject = null;
+  
+  // Handle webcam initialization
+  useEffect(() => {
+    let stream: MediaStream | null = null;
+    
+    const setupWebcam = async () => {
+      try {
+        if (videoSource === 'webcam') {
+          stream = await navigator.mediaDevices.getUserMedia({ video: true });
+          if (videoRef.current) {
+            videoRef.current.srcObject = stream;
+            videoRef.current.play();
+          }
+        }
+      } catch (error) {
+        console.error('Error accessing webcam:', error);
+        toast({
+          title: "Webcam Error",
+          description: "Could not access webcam. Please check permissions.",
+          variant: "destructive"
+        });
       }
-      videoRef.current.src = '';
-      videoRef.current.onloadedmetadata = null;
-      videoRef.current.onerror = null;
-    }
-  };
-
+    };
+    
+    setupWebcam();
+    
+    // Cleanup function
+    return () => {
+      if (stream) {
+        stream.getTracks().forEach(track => track.stop());
+      }
+    };
+  }, [videoSource]);
+  
   const handleFileUpload = (event: React.ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
     
     if (file && videoRef.current) {
       setIsVideoLoading(true);
-      setIsTransitioning(true);
-      setSourceType('upload');
       
-      resetVideoElement();
+      // Clear previous video source if any
+      if (videoRef.current.srcObject) {
+        const stream = videoRef.current.srcObject as MediaStream;
+        stream.getTracks().forEach(track => track.stop());
+        videoRef.current.srcObject = null;
+      }
       
       const videoUrl = URL.createObjectURL(file);
       videoRef.current.src = videoUrl;
       
+      // Set up event handlers for video loading
       videoRef.current.onloadedmetadata = () => {
         if (videoRef.current) {
           videoRef.current.play()
             .then(() => {
-              setIsVideoLoading(false);
-              setIsTransitioning(false);
               setVideoSource('upload');
-              setSourceType('upload');
+              setIsVideoLoading(false);
               console.log("Video playing successfully");
             })
             .catch(err => {
               console.error('Error auto-playing uploaded video:', err);
               setIsVideoLoading(false);
-              setIsTransitioning(false);
-              setVideoSource(null);
-              setSourceType(null);
-              resetVideoElement();
               toast({
                 title: "Playback Error",
                 description: "Could not play the uploaded video.",
@@ -78,10 +94,6 @@ const VideoDisplay = () => {
       videoRef.current.onerror = () => {
         console.error('Error loading video');
         setIsVideoLoading(false);
-        setIsTransitioning(false);
-        setVideoSource(null);
-        setSourceType(null);
-        resetVideoElement();
         toast({
           title: "Upload Error",
           description: "Could not load the video. Please try another file.",
@@ -89,22 +101,16 @@ const VideoDisplay = () => {
         });
       };
       
+      // Load the video
       videoRef.current.load();
     }
+    
+    // Reset file input so the same file can be selected again
+    if (event.target) {
+      event.target.value = '';
+    }
   };
-
-  const handleChangeSource = () => {
-    resetVideoElement();
-    setVideoSource(null);
-    setSourceType(null);
-    setIsTransitioning(false);
-  };
-
-  const handleTakeSnapshot = () => {
-    takeSnapshot();
-    setShowSnapshotPreview(true);
-  };
-
+  
   const handleFullscreen = () => {
     if (!videoRef.current) return;
     
@@ -123,7 +129,7 @@ const VideoDisplay = () => {
       });
     }
   };
-
+  
   const handlePictureInPicture = async () => {
     if (!videoRef.current) return;
     
@@ -142,88 +148,7 @@ const VideoDisplay = () => {
       });
     }
   };
-
-  const handleSnapshotDownload = () => {
-    if (!snapshotDataUrl) return;
-    const link = document.createElement('a');
-    link.href = snapshotDataUrl;
-    link.download = `snapshot-${new Date().toISOString()}.png`;
-    link.click();
-  };
-
-  const toggleSnapshotFullscreen = () => {
-    const container = document.querySelector('.snapshot-container');
-    if (!container) return;
-    
-    if (!document.fullscreenElement) {
-      container.requestFullscreen().catch(err => {
-        console.error('Error attempting to enable fullscreen:', err);
-      });
-    } else {
-      document.exitFullscreen().catch(err => {
-        console.error('Error attempting to exit fullscreen:', err);
-      });
-    }
-  };
-
-  useEffect(() => {
-    let stream: MediaStream | null = null;
-    
-    const setupWebcam = async () => {
-      if (sourceType !== 'webcam') return;
-
-      try {
-        setIsVideoLoading(true);
-        setIsTransitioning(true);
-
-        resetVideoElement();
-
-        stream = await navigator.mediaDevices.getUserMedia({ video: true });
-        if (videoRef.current && stream) {
-          videoRef.current.srcObject = stream;
-          videoRef.current.play()
-            .then(() => {
-              setIsVideoLoading(false);
-              setIsTransitioning(false);
-              setVideoSource('webcam');
-              console.log("Webcam playing successfully");
-            })
-            .catch(err => {
-              console.error('Error playing webcam stream:', err);
-              setIsVideoLoading(false);
-              setIsTransitioning(false);
-              toast({
-                title: "Webcam Playback",
-                description: "Could not auto-play webcam. Click the video to start playback.",
-                variant: "default"
-              });
-            });
-        }
-      } catch (error) {
-        console.error('Error accessing webcam:', error);
-        setIsVideoLoading(false);
-        setIsTransitioning(false);
-        setVideoSource(null);
-        setSourceType(null);
-        resetVideoElement();
-        toast({
-          title: "Webcam Error",
-          description: "Could not access webcam. Please check permissions.",
-          variant: "destructive"
-        });
-      }
-    };
-    
-    setupWebcam();
-    
-    return () => {
-      if (stream && sourceType !== 'webcam') {
-        stream.getTracks().forEach(track => track.stop());
-        stream = null;
-      }
-    };
-  }, [sourceType]); // Depend only on sourceType
-
+  
   return (
     <div className="w-full h-full flex flex-col">
       <div className="flex-1 bg-card rounded-lg overflow-hidden relative">
@@ -234,14 +159,9 @@ const VideoDisplay = () => {
             controls={videoSource === 'upload'}
             loop={videoSource === 'upload'}
             playsInline
-            onLoadedData={() => {
-              console.log("Video loaded successfully");
-              setIsVideoLoading(false);
-              setIsTransitioning(false);
-            }}
           />
           
-          {(isVideoLoading || isTransitioning) && (
+          {isVideoLoading && (
             <div className="absolute inset-0 flex items-center justify-center bg-black/70">
               <div className="flex flex-col items-center gap-2">
                 <div className="animate-spin h-8 w-8 border-4 border-primary border-t-transparent rounded-full"></div>
@@ -250,7 +170,7 @@ const VideoDisplay = () => {
             </div>
           )}
           
-          {videoSource && !isTransitioning && (
+          {videoSource && (
             <div className="absolute top-2 right-2 flex gap-1">
               <Button 
                 variant="ghost" 
@@ -273,12 +193,12 @@ const VideoDisplay = () => {
             </div>
           )}
           
-          {!videoSource && !isTransitioning && (
+          {!videoSource && (
             <div className="absolute inset-0 flex flex-col items-center justify-center bg-black/80 gap-4">
               <p className="text-lg text-center mb-4">Select a video source to begin monitoring</p>
               <div className="flex gap-3">
                 <Button 
-                  onClick={() => setSourceType('webcam')}
+                  onClick={() => setVideoSource('webcam')}
                   className="flex items-center gap-2"
                 >
                   <Camera className="h-4 w-4" />
@@ -303,27 +223,18 @@ const VideoDisplay = () => {
             </div>
           )}
           
+          {/* Snapshot preview */}
           {showSnapshotPreview && snapshotDataUrl && (
             <div className="absolute inset-0 flex flex-col items-center justify-center bg-black/80">
-              <div className="snapshot-container relative max-w-[55%] max-h-[90%]">
-                <div className="absolute top-2 right-2 flex gap-2">
-                  <Button 
-                    variant="ghost" 
-                    size="icon"
-                    className="bg-black/50 hover:bg-black/70 text-white"
-                    onClick={toggleSnapshotFullscreen}
-                  >
-                    <Maximize className="h-4 w-4" />
-                  </Button>
-                  <Button 
-                    variant="ghost" 
-                    size="icon"
-                    className="bg-black/50 hover:bg-black/70 text-white"
-                    onClick={() => setShowSnapshotPreview(false)}
-                  >
-                    <X className="h-4 w-4" />
-                  </Button>
-                </div>
+              <div className="relative max-w-[90%] max-h-[90%]">
+                <Button 
+                  variant="ghost" 
+                  size="icon"
+                  className="absolute top-2 right-2 bg-black/50 hover:bg-black/70"
+                  onClick={() => setShowSnapshotPreview(false)}
+                >
+                  X
+                </Button>
                 <img 
                   src={snapshotDataUrl} 
                   alt="Snapshot" 
@@ -332,7 +243,12 @@ const VideoDisplay = () => {
                 <div className="mt-4 flex justify-center">
                   <Button 
                     variant="outline" 
-                    onClick={handleSnapshotDownload}
+                    onClick={() => {
+                      const link = document.createElement('a');
+                      link.href = snapshotDataUrl;
+                      link.download = `snapshot-${new Date().toISOString()}.png`;
+                      link.click();
+                    }}
                     className="flex items-center gap-2"
                   >
                     <ArrowDown className="h-4 w-4" />
@@ -345,7 +261,8 @@ const VideoDisplay = () => {
         </div>
       </div>
       
-      {videoSource && !isTransitioning && (
+      {/* Video controls */}
+      {videoSource && (
         <div className="mt-3 flex flex-wrap gap-2">
           <Button
             variant={isDetectionActive ? "destructive" : "default"}
@@ -362,7 +279,10 @@ const VideoDisplay = () => {
           
           <Button
             variant="outline"
-            onClick={handleTakeSnapshot}
+            onClick={() => {
+              takeSnapshot();
+              setShowSnapshotPreview(true);
+            }}
             className="flex items-center gap-2"
             disabled={!videoSource}
           >
@@ -372,7 +292,18 @@ const VideoDisplay = () => {
           
           <Button
             variant="secondary"
-            onClick={handleChangeSource}
+            onClick={() => {
+              // Clean up current video source
+              if (videoRef.current) {
+                if (videoRef.current.srcObject) {
+                  const stream = videoRef.current.srcObject as MediaStream;
+                  stream.getTracks().forEach(track => track.stop());
+                }
+                videoRef.current.srcObject = null;
+                videoRef.current.src = '';
+              }
+              setVideoSource(null);
+            }}
             className="ml-auto"
           >
             Change Source
