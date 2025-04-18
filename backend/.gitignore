@@ -3,6 +3,7 @@ venv/
 myenv/
 .venv/  # Keep this for consistency with common conventions
 uploads/*
+Uploads/*
 config/.env
 db/*.db
 *.pyc

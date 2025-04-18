@@ -1,6 +1,6 @@
 from flask import Flask, render_template, request, send_from_directory, jsonify
 from flask_socketio import SocketIO
-from flask_cors import CORS  # For CORS support
+from flask_cors import CORS
 import cv2
 import threading
 import base64
@@ -69,24 +69,33 @@ detection_queue = Queue()
 detection_lock = threading.Lock()
 detection_frame_count = 0
 current_source = 'webcam'
+current_camera_id = None
 uploaded_video_path = None
 frame_buffer = []
 latest_frame = None
 
 # Database functions
 def db_execute(query, params=()):
-    with sqlite3.connect(DB_PATH) as conn:
-        cursor = conn.cursor()
-        cursor.execute(query, params)
-        conn.commit()
-        return cursor.lastrowid if 'INSERT' in query.upper() else None
+    try:
+        with sqlite3.connect(DB_PATH) as conn:
+            cursor = conn.cursor()
+            cursor.execute(query, params)
+            conn.commit()
+            return cursor.lastrowid if 'INSERT' in query.upper() else None
+    except Exception as e:
+        logger.error(f"Database execute error: {e}")
+        raise
 
 def db_fetch(query, params=()):
-    with sqlite3.connect(DB_PATH) as conn:
-        conn.row_factory = sqlite3.Row
-        cursor = conn.cursor()
-        cursor.execute(query, params)
-        return cursor.fetchall()
+    try:
+        with sqlite3.connect(DB_PATH) as conn:
+            conn.row_factory = sqlite3.Row
+            cursor = conn.cursor()
+            cursor.execute(query, params)
+            return cursor.fetchall()
+    except Exception as e:
+        logger.error(f"Database fetch error: {e}")
+        raise
 
 # Load settings from database
 def get_settings():
@@ -121,10 +130,8 @@ notification_lock = threading.Lock()
 
 # Conditional configuration based on environment
 if IS_DEVELOPMENT:
-    # In development mode, enable CORS for all API routes from Vite's dev server
     CORS(app, resources={r"/*": {"origins": "http://localhost:8080"}})
 else:
-    # In production mode, configure static file serving
     app.static_folder = '../static/build'
     app.static_url_path = '/'
     @app.route('/', defaults={'path': ''})
@@ -137,6 +144,15 @@ else:
 # Initialize SocketIO with conditional CORS settings
 cors_allowed_origins = 'http://localhost:8080' if IS_DEVELOPMENT else '*'
 socketio = SocketIO(app, async_mode='threading', cors_allowed_origins=cors_allowed_origins)
+
+# Serve uploaded files (snapshots, clips)
+@app.route('/Uploads/<filename>')
+def serve_upload(filename):
+    try:
+        return send_from_directory(app.config['UPLOAD_FOLDER'], filename)
+    except Exception as e:
+        logger.error(f"Error serving file {filename}: {e}")
+        return jsonify({"error": "File not found"}), 404
 
 # Health check endpoint for development
 if IS_DEVELOPMENT:
@@ -156,7 +172,8 @@ def run_model_on_sequence(sequence):
     sequence_array = np.array(sequence)
     sequence_array = np.expand_dims(sequence_array, axis=0)
     prediction = model.predict(sequence_array)
-    return prediction[0][0] < 0.5
+    confidence = float(prediction[0][0])
+    return confidence < 0.5, confidence
 
 def capture_clip(alert_id):
     if not enable_clip_capture or len(frame_buffer) < MAX_BUFFER_SIZE:
@@ -201,7 +218,7 @@ def send_email_alert(alert_id, message, clip_path=None):
             server.send_message(msg)
         db_execute("INSERT INTO Notifications (alert_id, type, recipient, sent_time, status, message) VALUES (?, ?, ?, ?, ?, ?)",
                    (alert_id, 'email', msg['To'], datetime.now(), 'sent', body))
-        db_execute("UPDATE Settings SET last_email_time=? WHERE setting_id=1", (datetime.now(),))
+        db_execute("UPDATE Settings SET last_email_time=? WHERE setting_id=1", (datetime.now().strftime('%Y-%m-%d %H:%M:%S'),))
         logger.info("Email alert sent successfully.")
     except Exception as e:
         db_execute("INSERT INTO Notifications (alert_id, type, recipient, sent_time, status, message) VALUES (?, ?, ?, ?, ?, ?)",
@@ -220,7 +237,7 @@ def send_sms_alert(alert_id, message):
         twilio_message = twilio_client.messages.create(body=sms_body, from_=TWILIO_PHONE_NUMBER, to=RECIPIENT_PHONE_NUMBER)
         db_execute("INSERT INTO Notifications (alert_id, type, recipient, sent_time, status, message) VALUES (?, ?, ?, ?, ?, ?)",
                    (alert_id, 'sms', RECIPIENT_PHONE_NUMBER, datetime.now(), 'sent', sms_body))
-        db_execute("UPDATE Settings SET last_sms_time=? WHERE setting_id=1", (datetime.now(),))
+        db_execute("UPDATE Settings SET last_sms_time=? WHERE setting_id=1", (datetime.now().strftime('%Y-%m-%d %H:%M:%S'),))
         logger.info(f"SMS alert sent successfully: SID {twilio_message.sid}")
     except TwilioRestException as e:
         db_execute("INSERT INTO Notifications (alert_id, type, recipient, sent_time, status, message) VALUES (?, ?, ?, ?, ?, ?)",
@@ -232,75 +249,88 @@ def can_send_notification(notif_type):
         cursor = conn.cursor()
         cursor.execute(f"SELECT last_{notif_type}_time FROM Settings WHERE setting_id=1")
         last_time = cursor.fetchone()[0]
-        current_time = time.time()
-        if not last_time or (current_time - time.mktime(datetime.strptime(last_time, '%Y-%m-%d %H:%M:%S').timetuple()) >= NOTIFICATION_COOLDOWN):
+        if not last_time:
             return True
-    return False
+        last_time_dt = datetime.strptime(last_time, '%Y-%m-%d %H:%M:%S')
+        current_time = datetime.now()
+        return (current_time - last_time_dt).total_seconds() >= NOTIFICATION_COOLDOWN
 
 def allowed_file(filename):
     return os.path.splitext(filename)[1].lower() in ALLOWED_EXTENSIONS
 
 def video_processing():
-    global detection_frame_count, current_source, uploaded_video_path, latest_frame
+    global detection_frame_count, current_source, current_camera_id, uploaded_video_path, latest_frame
     sequence_buffer = []
     cap = None
     current_cap_source = None
 
     while True:
-        if current_source == 'upload' and uploaded_video_path:
-            if current_cap_source != 'upload':
-                if cap: cap.release()
-                cap = cv2.VideoCapture(uploaded_video_path)
-                current_cap_source = 'upload'
-                sequence_buffer.clear()
-                if enable_clip_capture: frame_buffer.clear()
-        else:
-            if current_cap_source != 'webcam':
-                if cap: cap.release()
-                cap = cv2.VideoCapture(0)
-                current_cap_source = 'webcam'
-                sequence_buffer.clear()
-                if enable_clip_capture: frame_buffer.clear()
+        try:
+            if current_source == 'upload' and uploaded_video_path:
+                if current_cap_source != 'upload':
+                    if cap:
+                        cap.release()
+                    cap = cv2.VideoCapture(uploaded_video_path)
+                    current_cap_source = 'upload'
+                    sequence_buffer.clear()
+                    if enable_clip_capture:
+                        frame_buffer.clear()
+            else:
+                if current_cap_source != 'webcam':
+                    if cap:
+                        cap.release()
+                    cap = cv2.VideoCapture(0)  # TODO: Use current_camera_id when Cameras table is implemented
+                    current_cap_source = 'webcam'
+                    sequence_buffer.clear()
+                    if enable_clip_capture:
+                        frame_buffer.clear()
 
-        if not cap.isOpened():
-            logger.warning("Video capture not opened. Retrying...")
-            time.sleep(0.1)
-            continue
-
-        ret, frame = cap.read()
-        if not ret:
-            if current_cap_source == 'upload':
-                cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+            if not cap or not cap.isOpened():
+                logger.warning("Video capture not opened. Retrying...")
+                time.sleep(0.1)
                 continue
-            logger.warning("Failed to read frame. Retrying...")
+
+            ret, frame = cap.read()
+            if not ret:
+                if current_cap_source == 'upload':
+                    cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+                    continue
+                logger.warning("Failed to read frame. Retrying...")
+                time.sleep(0.1)
+                continue
+
+            with detection_lock:
+                latest_frame = frame.copy()
+                if enable_clip_capture:
+                    frame_buffer.append(frame.copy())
+                    if len(frame_buffer) > MAX_BUFFER_SIZE:
+                        frame_buffer.pop(0)
+
+            processed_frame = preprocess_frame(frame)
+            if processed_frame is not None:
+                sequence_buffer.append(processed_frame)
+                if len(sequence_buffer) == SEQUENCE_LENGTH:
+                    detection_queue.put(sequence_buffer.copy())
+                    sequence_buffer.clear()
+
+            with detection_lock:
+                display_text = detection_frame_count > 0
+                if display_text:
+                    detection_frame_count -= 1
+
+            if display_text:
+                cv2.putText(frame, "Shoplifting Detected!", (50, 50), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2)
+
+            ret, buffer = cv2.imencode('.jpg', frame, [int(cv2.IMWRITE_JPEG_QUALITY), 80])
+            if ret:
+                socketio.emit('frame', {'image': base64.b64encode(buffer).decode('utf-8')})
+            else:
+                logger.error("Failed to encode frame as JPEG")
+
+            time.sleep(1/30)
+        except Exception as e:
+            logger.error(f"Video processing error: {e}")
             time.sleep(0.1)
-            continue
-
-        latest_frame = frame.copy()
-        if enable_clip_capture:
-            frame_buffer.append(frame.copy())
-            if len(frame_buffer) > MAX_BUFFER_SIZE:
-                frame_buffer.pop(0)
-
-        processed_frame = preprocess_frame(frame)
-        if processed_frame is not None:
-            sequence_buffer.append(processed_frame)
-            if len(sequence_buffer) == SEQUENCE_LENGTH:
-                detection_queue.put(sequence_buffer.copy())
-                sequence_buffer.clear()
-
-        with detection_lock:
-            display_text = detection_frame_count > 0
-            if display_text: detection_frame_count -= 1
-
-        if display_text:
-            cv2.putText(frame, "Shoplifting Detected!", (50, 50), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2)
-
-        ret, buffer = cv2.imencode('.jpg', frame)
-        if ret:
-            socketio.emit('frame', {'image': base64.b64encode(buffer).decode('utf-8')})
-
-        time.sleep(1/30)
 
 def detection_worker():
     global detection_frame_count
@@ -309,17 +339,25 @@ def detection_worker():
         if sequence is None:
             break
         try:
-            if run_model_on_sequence(sequence):
+            is_shoplifting, confidence = run_model_on_sequence(sequence)
+            if is_shoplifting:
                 with detection_lock:
                     detection_frame_count = 20
                 alert_message = "Suspicious activity detected!"
-                socketio.emit('alert', {'message': alert_message})
+                socketio.emit('alert', {
+                    'message': alert_message,
+                    'confidence': confidence,
+                    'source': current_source,
+                    'camera_id': current_camera_id
+                })
                 if enable_logging:
-                    alert_id = db_execute("INSERT INTO Alerts (timestamp, confidence, source, status, details, model_version) VALUES (?, ?, ?, ?, ?, ?)",
-                                          (datetime.now(), 0.5, current_source, 'new', alert_message, '1.0'))
+                    alert_id = db_execute(
+                        "INSERT INTO Alerts (timestamp, confidence, source, status, details, model_version, camera_id) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                        (datetime.now(), confidence, current_source, 'new', alert_message, '1.0', current_camera_id)
+                    )
                     db_execute("INSERT INTO AuditLog (action, details) VALUES (?, ?)", ("alert_detected", f"Alert ID: {alert_id}"))
                     clip_path = capture_clip(alert_id)
-                    if (enable_email_notifications or enable_sms_notifications):
+                    if enable_email_notifications or enable_sms_notifications:
                         if enable_email_notifications and can_send_notification('email'):
                             send_email_alert(alert_id, alert_message, clip_path)
                         if enable_sms_notifications and can_send_notification('sms'):
@@ -338,36 +376,32 @@ def detection_worker():
 @app.route('/upload_video', methods=['POST'])
 def upload_video():
     global uploaded_video_path
-    
-    # Check if file is included in request
     if 'video' not in request.files:
         logger.error("No video file provided in request")
+        db_execute("INSERT INTO AuditLog (action, details) VALUES (?, ?)", ("upload_failed", "No video file provided"))
         return jsonify({"error": "No video file provided"}), 400
-    
+
     file = request.files['video']
-    
-    # Check for empty filename
     if file.filename == '':
         logger.error("No file selected")
+        db_execute("INSERT INTO AuditLog (action, details) VALUES (?, ?)", ("upload_failed", "No file selected"))
         return jsonify({"error": "No file selected"}), 400
-    
-    # Validate file type
+
     if not allowed_file(file.filename):
         logger.error(f"Unsupported file type: {file.filename}")
+        db_execute("INSERT INTO AuditLog (action, details) VALUES (?, ?)", ("upload_failed", f"Unsupported file type: {file.filename}"))
         return jsonify({"error": f"Unsupported file type. Allowed: {', '.join(ALLOWED_EXTENSIONS)}"}), 415
-    
-    # Check file size
+
     file.seek(0, os.SEEK_END)
     file_size = file.tell()
     if file_size > MAX_UPLOAD_SIZE:
-        logger.error(f"File too large: {file_size} bytes, max allowed: {MAX_UPLOAD_SIZE} bytes")
+        logger.error(f"File too large: {file_size} bytes")
+        db_execute("INSERT INTO AuditLog (action, details) VALUES (?, ?)", ("upload_failed", f"File too large: {file_size} bytes"))
         return jsonify({"error": f"File too large. Maximum size is {MAX_UPLOAD_SIZE // (1024 * 1024)}MB"}), 413
-    file.seek(0)  # Reset file pointer
-    
-    # Secure filename and save file
-    filename = secure_filename(file.filename)
+    file.seek(0)
+
+    filename = secure_filename(f"{time.strftime('%Y%m%d-%H%M%S')}_{file.filename}")
     file_path = os.path.join(app.config['UPLOAD_FOLDER'], filename)
-    
     try:
         file.save(file_path)
         uploaded_video_path = file_path
@@ -375,80 +409,122 @@ def upload_video():
         logger.info(f"Video uploaded: {file_path}")
         return jsonify({"message": "Video uploaded successfully", "filename": filename}), 200
     except Exception as e:
-        logger.error(f"Failed to save video file: {str(e)}")
+        logger.error(f"Failed to save video file: {e}")
+        db_execute("INSERT INTO AuditLog (action, details) VALUES (?, ?)", ("upload_failed", f"Failed to save {filename}: {e}"))
         return jsonify({"error": "Failed to save video file. Please try again."}), 500
 
 @socketio.on('set_source')
 def set_source(data):
-    global current_source
-    source = data['source']
-    current_source = 'uploaded' if source == 'upload' else 'webcam'
-    db_execute("INSERT INTO AuditLog (action, details) VALUES (?, ?)", ("set_source", f"Source set to {current_source}"))
-    logger.info(f"Setting source to {current_source}")
+    global current_source, current_camera_id
+    try:
+        source = data.get('source')
+        camera_id = data.get('camera_id')
+        if source not in ['webcam', 'upload']:
+            logger.error(f"Invalid source: {source}")
+            db_execute("INSERT INTO AuditLog (action, details) VALUES (?, ?)", ("set_source_failed", f"Invalid source: {source}"))
+            return
+        current_source = source
+        current_camera_id = camera_id if camera_id is not None else None
+        db_execute("INSERT INTO AuditLog (action, details) VALUES (?, ?)", ("set_source", f"Source set to {current_source}, camera_id: {current_camera_id}"))
+        logger.info(f"Setting source to {current_source}, camera_id: {current_camera_id}")
+    except Exception as e:
+        logger.error(f"Error setting source: {e}")
+        db_execute("INSERT INTO AuditLog (action, details) VALUES (?, ?)", ("set_source_failed", f"Error: {e}"))
 
 @socketio.on('connect')
 def handle_connect():
     logger.info("Client connected")
     socketio.emit('notification_status', {
-        'email': enable_email_notifications,
-        'sms': enable_sms_notifications,
-        'clip': enable_clip_capture,
-        'clip_duration': CLIP_DURATION,
-        'logging': enable_logging
+        'email_enabled': enable_email_notifications,
+        'sms_enabled': enable_sms_notifications,
+        'clip_capture_enabled': enable_clip_capture,
+        'clip_duration_seconds': CLIP_DURATION,
+        'logging_enabled': enable_logging
     })
-    logs = db_fetch("SELECT timestamp, details FROM Alerts ORDER BY timestamp DESC LIMIT 20")
-    socketio.emit('alert_logs', [{'timestamp': row['timestamp'], 'details': row['details']} for row in logs])
+    logs = db_fetch("SELECT alert_id, timestamp, details, source, confidence, camera_id FROM Alerts ORDER BY timestamp DESC LIMIT 20")
+    socketio.emit('alert_logs', [{
+        'alert_id': row['alert_id'],
+        'timestamp': row['timestamp'],
+        'details': row['details'],
+        'source': row['source'],
+        'confidence': float(row['confidence']),
+        'camera_id': row['camera_id']
+    } for row in logs])
 
 @socketio.on('toggle_notifications')
 def toggle_notifications(data):
     global enable_email_notifications, enable_sms_notifications
-    if 'email' in data:
-        enable_email_notifications = data['email']
-        db_execute("UPDATE Settings SET email_enabled=?, last_updated=? WHERE setting_id=1",
-                   (int(data['email']), datetime.now()))
-        db_execute("INSERT INTO AuditLog (action, details) VALUES (?, ?)",
-                   ("toggle_email", f"Email set to {data['email']}"))
-        logger.info(f"Email notifications {'enabled' if enable_email_notifications else 'disabled'}")
-    if 'sms' in data:
-        enable_sms_notifications = data['sms']
-        db_execute("UPDATE Settings SET sms_enabled=?, last_updated=? WHERE setting_id=1",
-                   (int(data['sms']), datetime.now()))
-        db_execute("INSERT INTO AuditLog (action, details) VALUES (?, ?)",
-                   ("toggle_sms", f"SMS set to {data['sms']}"))
-        logger.info(f"SMS notifications {'enabled' if enable_sms_notifications else 'disabled'}")
-    socketio.emit('notification_status', {
-        'email': enable_email_notifications,
-        'sms': enable_sms_notifications,
-        'clip': enable_clip_capture,
-        'clip_duration': CLIP_DURATION,
-        'logging': enable_logging
-    })
+    try:
+        notification_type = data.get('type')
+        enabled = data.get('enabled')
+        if notification_type not in ['email', 'sms'] or not isinstance(enabled, bool):
+            logger.error(f"Invalid toggle_notifications data: {data}")
+            db_execute("INSERT INTO AuditLog (action, details) VALUES (?, ?)", ("toggle_notifications_failed", f"Invalid data: {data}"))
+            return
+        if notification_type == 'email':
+            enable_email_notifications = enabled
+            db_execute("UPDATE Settings SET email_enabled=?, last_updated=? WHERE setting_id=1",
+                       (int(enabled), datetime.now()))
+            db_execute("INSERT INTO AuditLog (action, details) VALUES (?, ?)",
+                       ("toggle_email", f"Email set to {enabled}"))
+            logger.info(f"Email notifications {'enabled' if enabled else 'disabled'}")
+        elif notification_type == 'sms':
+            enable_sms_notifications = enabled
+            db_execute("UPDATE Settings SET sms_enabled=?, last_updated=? WHERE setting_id=1",
+                       (int(enabled), datetime.now()))
+            db_execute("INSERT INTO AuditLog (action, details) VALUES (?, ?)",
+                       ("toggle_sms", f"SMS set to {enabled}"))
+            logger.info(f"SMS notifications {'enabled' if enabled else 'disabled'}")
+        socketio.emit('notification_status', {
+            'email_enabled': enable_email_notifications,
+            'sms_enabled': enable_sms_notifications,
+            'clip_capture_enabled': enable_clip_capture,
+            'clip_duration_seconds': CLIP_DURATION,
+            'logging_enabled': enable_logging
+        })
+    except Exception as e:
+        logger.error(f"Error toggling notifications: {e}")
+        db_execute("INSERT INTO AuditLog (action, details) VALUES (?, ?)", ("toggle_notifications_failed", f"Error: {e}"))
 
 @socketio.on('toggle_clip_capture')
 def toggle_clip_capture(data):
     global enable_clip_capture
-    if 'clip' in data:
-        enable_clip_capture = data['clip']
+    try:
+        enabled = data.get('enabled')
+        if not isinstance(enabled, bool):
+            logger.error(f"Invalid toggle_clip_capture data: {data}")
+            db_execute("INSERT INTO AuditLog (action, details) VALUES (?, ?)", ("toggle_clip_failed", f"Invalid data: {data}"))
+            return
+        enable_clip_capture = enabled
         db_execute("UPDATE Settings SET clip_capture_enabled=?, last_updated=? WHERE setting_id=1",
-                   (int(data['clip']), datetime.now()))
+                   (int(enabled), datetime.now()))
         db_execute("INSERT INTO AuditLog (action, details) VALUES (?, ?)",
-                   ("toggle_clip", f"Clip capture set to {data['clip']}"))
+                   ("toggle_clip", f"Clip capture set to {enabled}"))
         if not enable_clip_capture:
-            frame_buffer.clear()
-        logger.info(f"Clip capture {'enabled' if enable_clip_capture else 'disabled'}")
+            with detection_lock:
+                frame_buffer.clear()
+        logger.info(f"Clip capture {'enabled' if enabled else 'disabled'}")
         socketio.emit('notification_status', {
-            'email': enable_email_notifications,
-            'sms': enable_sms_notifications,
-            'clip': enable_clip_capture,
-            'clip_duration': CLIP_DURATION,
-            'logging': enable_logging
+            'email_enabled': enable_email_notifications,
+            'sms_enabled': enable_sms_notifications,
+            'clip_capture_enabled': enable_clip_capture,
+            'clip_duration_seconds': CLIP_DURATION,
+            'logging_enabled': enable_logging
         })
+    except Exception as e:
+        logger.error(f"Error toggling clip capture: {e}")
+        db_execute("INSERT INTO AuditLog (action, details) VALUES (?, ?)", ("toggle_clip_failed", f"Error: {e}"))
 
 @socketio.on('set_clip_duration')
 def set_clip_duration(data):
     global CLIP_DURATION, MAX_BUFFER_SIZE
-    if 'duration' in data and isinstance(data['duration'], (int, float)) and data['duration'] > 0 and data['duration'] <= 1800:
-        CLIP_DURATION = float(data['duration'])
+    try:
+        duration = data.get('duration')
+        if not isinstance(duration, (int, float)) or duration <= 0 or duration > 1800:
+            logger.error(f"Invalid clip duration: {duration}")
+            db_execute("INSERT INTO AuditLog (action, details) VALUES (?, ?)", ("set_clip_duration_failed", f"Invalid duration: {duration}"))
+            return
+        CLIP_DURATION = float(duration)
         MAX_BUFFER_SIZE = int(CLIP_DURATION * FRAME_RATE)
         db_execute("UPDATE Settings SET clip_duration_seconds=?, last_updated=? WHERE setting_id=1",
                    (CLIP_DURATION, datetime.now()))
@@ -456,58 +532,95 @@ def set_clip_duration(data):
                    ("set_clip_duration", f"Clip duration set to {CLIP_DURATION} seconds"))
         logger.info(f"Clip duration updated to {CLIP_DURATION} seconds")
         socketio.emit('notification_status', {
-            'email': enable_email_notifications,
-            'sms': enable_sms_notifications,
-            'clip': enable_clip_capture,
-            'clip_duration': CLIP_DURATION,
-            'logging': enable_logging
+            'email_enabled': enable_email_notifications,
+            'sms_enabled': enable_sms_notifications,
+            'clip_capture_enabled': enable_clip_capture,
+            'clip_duration_seconds': CLIP_DURATION,
+            'logging_enabled': enable_logging
         })
+    except Exception as e:
+        logger.error(f"Error setting clip duration: {e}")
+        db_execute("INSERT INTO AuditLog (action, details) VALUES (?, ?)", ("set_clip_duration_failed", f"Error: {e}"))
 
 @socketio.on('capture_snapshot')
 def capture_snapshot():
     global latest_frame
-    if latest_frame is not None:
+    try:
+        if latest_frame is None or latest_frame.size == 0:
+            logger.error("No valid frame available for snapshot")
+            db_execute("INSERT INTO AuditLog (action, details) VALUES (?, ?)", ("snapshot_failed", "No valid frame"))
+            return
         timestamp = time.strftime("%Y%m%d-%H%M%S")
         file_path = os.path.join(UPLOAD_FOLDER, f"snapshot_{timestamp}.jpg")
-        cv2.imwrite(file_path, latest_frame)
-        snapshot_size = os.path.getsize(file_path) if os.path.exists(file_path) else 0
-        db_execute("INSERT INTO Snapshots (file_path, timestamp, size) VALUES (?, ?, ?)",
-                   (file_path, datetime.now(), snapshot_size))
-        db_execute("INSERT INTO AuditLog (action, details) VALUES (?, ?)",
-                   ("snapshot", f"Saved to {file_path} ({snapshot_size} bytes)"))
-        logger.info(f"Snapshot saved: {file_path}")
+        if cv2.imwrite(file_path, latest_frame):
+            snapshot_size = os.path.getsize(file_path) if os.path.exists(file_path) else 0
+            db_execute("INSERT INTO Snapshots (file_path, timestamp, size) VALUES (?, ?, ?)",
+                       (file_path, datetime.now(), snapshot_size))
+            db_execute("INSERT INTO AuditLog (action, details) VALUES (?, ?)",
+                       ("snapshot", f"Saved to {file_path} ({snapshot_size} bytes)"))
+            socketio.emit('snapshot', {'file_path': f"/Uploads/snapshot_{timestamp}.jpg"})
+            logger.info(f"Snapshot saved: {file_path}")
+        else:
+            logger.error("Failed to save snapshot")
+            db_execute("INSERT INTO AuditLog (action, details) VALUES (?, ?)", ("snapshot_failed", "Failed to save snapshot"))
+    except Exception as e:
+        logger.error(f"Error capturing snapshot: {e}")
+        db_execute("INSERT INTO AuditLog (action, details) VALUES (?, ?)", ("snapshot_failed", f"Error: {e}"))
 
 @socketio.on('update_alert')
 def update_alert(data):
-    alert_id = data.get('alert_id')
-    status = data.get('status')
-    notes = data.get('notes', '')
-    if alert_id and status in ['new', 'processed', 'dismissed']:
+    try:
+        alert_id = data.get('alert_id')
+        status = data.get('status')
+        notes = data.get('notes', '')
+        if not alert_id or status not in ['new', 'processed', 'dismissed']:
+            logger.error(f"Invalid update_alert data: {data}")
+            db_execute("INSERT INTO AuditLog (action, details) VALUES (?, ?)", ("update_alert_failed", f"Invalid data: {data}"))
+            return
         db_execute("UPDATE Alerts SET status=?, notes=?, last_updated=? WHERE alert_id=?",
                    (status, notes, datetime.now(), alert_id))
         db_execute("INSERT INTO AuditLog (action, details) VALUES (?, ?)",
                    ("update_alert", f"Alert {alert_id} updated to {status} with notes: {notes}"))
         logger.info(f"Alert {alert_id} updated to {status}")
-    else:
-        logger.warning("Invalid update_alert data")
+    except Exception as e:
+        logger.error(f"Error updating alert: {e}")
+        db_execute("INSERT INTO AuditLog (action, details) VALUES (?, ?)", ("update_alert_failed", f"Error: {e}"))
 
 @socketio.on('toggle_logging')
 def toggle_logging(data):
     global enable_logging
-    if 'logging_enabled' in data:
-        enable_logging = bool(data['logging_enabled'])
+    try:
+        enabled = data.get('enabled')
+        if not isinstance(enabled, bool):
+            logger.error(f"Invalid toggle_logging data: {data}")
+            db_execute("INSERT INTO AuditLog (action, details) VALUES (?, ?)", ("toggle_logging_failed", f"Invalid data: {data}"))
+            return
+        enable_logging = enabled
         db_execute("UPDATE Settings SET logging_enabled=?, last_updated=? WHERE setting_id=1",
-                   (int(enable_logging), datetime.now()))
+                   (int(enabled), datetime.now()))
         db_execute("INSERT INTO AuditLog (action, details) VALUES (?, ?)",
-                   ("toggle_logging", f"Logging set to {enable_logging}"))
-        logger.info(f"Alert logging {'enabled' if enable_logging else 'disabled'}")
+                   ("toggle_logging", f"Logging set to {enabled}"))
+        logger.info(f"Alert logging {'enabled' if enabled else 'disabled'}")
         socketio.emit('notification_status', {
-            'email': enable_email_notifications,
-            'sms': enable_sms_notifications,
-            'clip': enable_clip_capture,
-            'clip_duration': CLIP_DURATION,
-            'logging': enable_logging
+            'email_enabled': enable_email_notifications,
+            'sms_enabled': enable_sms_notifications,
+            'clip_capture_enabled': enable_clip_capture,
+            'clip_duration_seconds': CLIP_DURATION,
+            'logging_enabled': enable_logging
         })
+    except Exception as e:
+        logger.error(f"Error toggling logging: {e}")
+        db_execute("INSERT INTO AuditLog (action, details) VALUES (?, ?)", ("toggle_logging_failed", f"Error: {e}"))
+
+@socketio.on('log_error')
+def log_error(data):
+    try:
+        action = data.get('action', 'unknown_error')
+        details = data.get('details', 'No details provided')
+        db_execute("INSERT INTO AuditLog (action, details) VALUES (?, ?)", (action, details))
+        logger.info(f"Frontend error logged: {action} - {details}")
+    except Exception as e:
+        logger.error(f"Error logging frontend error: {e}")
 
 detection_thread = threading.Thread(target=detection_worker, daemon=True)
 detection_thread.start()
