@@ -33,7 +33,7 @@ app = Flask(__name__)
 UPLOAD_FOLDER = os.path.join(os.path.dirname(__file__), 'Uploads')
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 app.config['UPLOAD_FOLDER'] = UPLOAD_FOLDER
-DB_PATH = os.path.join(os.path.dirname(__file__), 'db', 'sldv1.db')
+DB_PATH = os.path.join(os.path.dirname(__file__), 'db', 'sldv2.db')
 MAX_UPLOAD_SIZE = 100 * 1024 * 1024  # 100MB limit
 ALLOWED_EXTENSIONS = {'.mp4', '.avi', '.mov'}
 
