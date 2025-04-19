@@ -6,7 +6,7 @@ CREATE TABLE Cameras (
     status TEXT DEFAULT 'active' CHECK (status IN ('active', 'inactive'))
 );
 
--- Alerts table (added 'notes' and 'last_updated' fields)
+-- Alerts table (added 'read', 'is_false_positive', and notes length constraint)
 CREATE TABLE Alerts (
     alert_id INTEGER PRIMARY KEY AUTOINCREMENT,
     timestamp DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -16,8 +16,10 @@ CREATE TABLE Alerts (
     details VARCHAR(255),
     model_version TEXT DEFAULT '1.0',
     camera_id INTEGER,
-    notes TEXT,  -- New field for storing additional information about the alert
-    last_updated DATETIME,  -- New field to track when the alert was last updated
+    notes TEXT CHECK (LENGTH(notes) <= 2000),
+    last_updated DATETIME,
+    read INTEGER NOT NULL DEFAULT 0 CHECK (read IN (0, 1)),
+    is_false_positive INTEGER NOT NULL DEFAULT 0 CHECK (is_false_positive IN (0, 1)),
     FOREIGN KEY (camera_id) REFERENCES Cameras(camera_id) ON DELETE SET NULL
 );
 CREATE INDEX idx_alerts_timestamp ON Alerts(timestamp);
@@ -63,20 +65,19 @@ CREATE TABLE Notifications (
 CREATE INDEX idx_notifications_alert_id ON Notifications(alert_id);
 CREATE INDEX idx_notifications_sent_time ON Notifications(sent_time);
 
--- Settings table (added 'logging_enabled' field and fixed typo in 'sms_enabled' CHECK constraint)
+-- Settings table (unchanged)
 CREATE TABLE Settings (
     setting_id INTEGER PRIMARY KEY CHECK (setting_id = 1),
     email_enabled INTEGER NOT NULL DEFAULT 0 CHECK (email_enabled IN (0, 1)),
-    sms_enabled INTEGER NOT NULL DEFAULT 0 CHECK (sms_enabled IN (0, 1)),  -- Fixed typo: was 'email_enabled'
+    sms_enabled INTEGER NOT NULL DEFAULT 0 CHECK (sms_enabled IN (0, 1)),
     clip_capture_enabled INTEGER NOT NULL DEFAULT 0 CHECK (clip_capture_enabled IN (0, 1)),
     clip_duration_seconds REAL NOT NULL DEFAULT 6.0 CHECK (clip_duration_seconds > 0 AND clip_duration_seconds <= 1800),
     cooldown_seconds INTEGER NOT NULL DEFAULT 60 CHECK (cooldown_seconds >= 0),
-    logging_enabled INTEGER NOT NULL DEFAULT 1 CHECK (logging_enabled IN (0, 1)),  -- New field for enabling/disabling alert logging
+    logging_enabled INTEGER NOT NULL DEFAULT 1 CHECK (logging_enabled IN (0, 1)),
     last_updated DATETIME DEFAULT CURRENT_TIMESTAMP,
     last_email_time DATETIME,
     last_sms_time DATETIME
 );
--- Updated INSERT statement to include 'logging_enabled'
 INSERT INTO Settings (setting_id, email_enabled, sms_enabled, clip_capture_enabled, clip_duration_seconds, cooldown_seconds, logging_enabled)
 VALUES (1, 0, 0, 0, 6.0, 60, 1);
 

@@ -1,34 +1,35 @@
-
 import React, { useState, useMemo } from 'react';
 import { useApp } from '../context/AppContext';
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
+import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Clock, AlertTriangle, Info, Search, Trash, AlertCircle, Flag, EyeOff, Eye } from 'lucide-react';
 import AlertDetails from './AlertDetails';
 import { Alert } from '@/context/AppContext';
+import socketService from '@/services/socketService';
 
 const AlertsLog = () => {
-  const { alerts, clearAlerts } = useApp();
+  const { alerts, clearAlerts, markAlertAsRead } = useApp();
   const [searchTerm, setSearchTerm] = useState('');
   const [selectedAlert, setSelectedAlert] = useState<Alert | null>(null);
   const [isHidden, setIsHidden] = useState(false);
   const [unreadCount, setUnreadCount] = useState(0);
-  
+
   // Track unread alerts
   React.useEffect(() => {
-    // Consider all new alerts as unread
     const newUnread = alerts.filter(alert => !alert.read).length;
     setUnreadCount(newUnread);
   }, [alerts]);
-  
+
   const filteredAlerts = useMemo(() => {
     if (!searchTerm.trim()) return alerts;
-    
+
     const term = searchTerm.toLowerCase();
-    return alerts.filter(alert => 
-      alert.message.toLowerCase().includes(term) || 
-      alert.type.toLowerCase().includes(term)
+    return alerts.filter(alert =>
+      alert.message.toLowerCase().includes(term) ||
+      alert.type.toLowerCase().includes(term) ||
+      alert.source.toLowerCase().includes(term) ||
+      (alert.camera_id?.toString() || '').includes(term)
     );
   }, [alerts, searchTerm]);
 
@@ -50,10 +51,9 @@ const AlertsLog = () => {
   };
 
   const handleAlertClick = (alert: Alert) => {
-    // Mark alert as read when clicked
     if (!alert.read) {
-      // This would typically update the alert in the context
-      // For now, we'll just update the unread count in the component state
+      markAlertAsRead(alert.id);
+      socketService.emit('update_alert', { alert_id: alert.id, status: alert.status, read: true });
       setUnreadCount(prev => Math.max(0, prev - 1));
     }
     setSelectedAlert(alert);
@@ -62,27 +62,31 @@ const AlertsLog = () => {
   const handleCloseDialog = () => {
     setSelectedAlert(null);
   };
-  
+
+  const handleClearAlerts = () => {
+    clearAlerts();
+    socketService.emit('clear_alerts');
+  };
+
   const toggleHidden = () => {
     setIsHidden(!isHidden);
   };
-  
-  const getAlertItemClassName = (alertType: string) => {
-    let borderClass = "";
-    switch (alertType) {
+
+  const getAlertItemClassName = (alert: Alert) => {
+    let borderClass = '';
+    switch (alert.type) {
       case 'critical':
-        borderClass = "border-l-4 border-l-alert";
+        borderClass = 'border-l-4 border-l-alert';
         break;
       case 'warning':
-        borderClass = "border-l-4 border-l-warning";
+        borderClass = 'border-l-4 border-l-warning';
         break;
       case 'info':
-        borderClass = "border-l-4 border-l-info";
+        borderClass = 'border-l-4 border-l-info';
         break;
-      default:
-        borderClass = "";
     }
-    return `alert-item cursor-pointer hover:bg-muted transition-colors rounded-md p-2 ${borderClass}`;
+    const statusClass = alert.status === 'dismissed' ? 'opacity-50' : '';
+    return `alert-item cursor-pointer hover:bg-muted transition-colors rounded-md p-2 ${borderClass} ${statusClass}`;
   };
 
   if (isHidden) {
@@ -98,9 +102,9 @@ const AlertsLog = () => {
                 </span>
               )}
             </div>
-            <Button 
-              variant="ghost" 
-              size="sm" 
+            <Button
+              variant="ghost"
+              size="sm"
               onClick={toggleHidden}
               className="h-8 px-2 text-muted-foreground"
             >
@@ -127,19 +131,19 @@ const AlertsLog = () => {
             )}
           </div>
           <div className="flex items-center gap-1">
-            <Button 
-              variant="ghost" 
-              size="sm" 
-              onClick={clearAlerts}
+            <Button
+              variant="ghost"
+              size="sm"
+              onClick={handleClearAlerts}
               className="h-8 px-2 text-muted-foreground"
               disabled={alerts.length === 0}
             >
               <Trash className="h-4 w-4 mr-1" />
               Clear
             </Button>
-            <Button 
-              variant="ghost" 
-              size="sm" 
+            <Button
+              variant="ghost"
+              size="sm"
               onClick={toggleHidden}
               className="h-8 px-2 text-muted-foreground"
             >
@@ -149,7 +153,7 @@ const AlertsLog = () => {
           </div>
         </CardTitle>
         <CardDescription>Recent detection events</CardDescription>
-        
+
         <div className="relative mt-2">
           <Search className="absolute left-2 top-2.5 h-4 w-4 text-muted-foreground" />
           <Input
@@ -171,11 +175,11 @@ const AlertsLog = () => {
               )}
             </div>
           )}
-          
+
           {filteredAlerts.map(alert => (
-            <div 
-              key={alert.id} 
-              className={getAlertItemClassName(alert.type)}
+            <div
+              key={alert.id}
+              className={getAlertItemClassName(alert)}
               onClick={() => handleAlertClick(alert)}
               role="button"
               tabIndex={0}
@@ -203,35 +207,26 @@ const AlertsLog = () => {
                     <div className="flex items-center text-xs text-muted-foreground mt-1">
                       <Clock className="h-3 w-3 mr-1" />
                       {formatTime(alert.timestamp)}
+                      <span className="ml-2">{alert.source}</span>
+                      {alert.camera_id && <span className="ml-2">Camera {alert.camera_id}</span>}
                       {alert.notes && (
                         <span className="ml-2 text-xs text-muted-foreground italic">Has notes</span>
                       )}
                     </div>
+                    <div className="text-xs text-muted-foreground">
+                      Confidence: {(alert.confidence * 100).toFixed(1)}%
+                    </div>
                   </div>
                 </div>
-                
-                {alert.videoClipUrl && (
-                  <Button 
-                    variant="ghost" 
-                    size="sm" 
-                    className="h-7 text-xs"
-                    onClick={(e) => {
-                      e.stopPropagation(); // Prevent triggering parent onClick
-                      // Handle video clip action
-                    }}
-                  >
-                    View Clip
-                  </Button>
-                )}
               </div>
             </div>
           ))}
         </div>
       </CardContent>
-      
-      <AlertDetails 
-        alert={selectedAlert} 
-        open={!!selectedAlert} 
+
+      <AlertDetails
+        alert={selectedAlert}
+        open={!!selectedAlert}
         onOpenChange={handleCloseDialog}
       />
     </Card>

@@ -1,4 +1,3 @@
-
 import React, { useState } from 'react';
 import { Dialog, DialogContent, DialogTitle, DialogFooter, DialogHeader } from '@/components/ui/dialog';
 import { Button } from '@/components/ui/button';
@@ -15,22 +14,31 @@ interface AddNoteDialogProps {
 const AddNoteDialog = ({ open, onOpenChange, existingNote = '', onSaveNote }: AddNoteDialogProps) => {
   const [note, setNote] = useState(existingNote);
   const { toast } = useToast();
+  const maxLength = 500;
 
   const handleSave = () => {
-    if (note.trim()) {
-      onSaveNote(note.trim());
-      toast({
-        title: "Note Saved",
-        description: "Your note has been added to the alert.",
-      });
-      onOpenChange(false);
-    } else {
+    if (!note.trim()) {
       toast({
         title: "Empty Note",
         description: "Please enter a note before saving.",
         variant: "destructive"
       });
+      return;
     }
+    if (note.length > maxLength) {
+      toast({
+        title: "Note Too Long",
+        description: `Note must be ${maxLength} characters or less.`,
+        variant: "destructive"
+      });
+      return;
+    }
+    onSaveNote(note.trim());
+    toast({
+      title: "Note Saved",
+      description: "Your note has been added to the alert.",
+    });
+    onOpenChange(false);
   };
 
   return (
@@ -39,16 +47,20 @@ const AddNoteDialog = ({ open, onOpenChange, existingNote = '', onSaveNote }: Ad
         <DialogHeader>
           <DialogTitle>Add Note to Alert</DialogTitle>
         </DialogHeader>
-        
+
         <div className="py-4">
           <Textarea
             placeholder="Enter your notes about this alert..."
             className="min-h-[150px] resize-none"
             value={note}
             onChange={(e) => setNote(e.target.value)}
+            maxLength={maxLength}
           />
+          <p className="text-xs text-muted-foreground mt-1">
+            {note.length}/{maxLength} characters
+          </p>
         </div>
-        
+
         <DialogFooter>
           <Button variant="outline" onClick={() => onOpenChange(false)}>
             Cancel

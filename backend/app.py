@@ -352,8 +352,8 @@ def detection_worker():
                 })
                 if enable_logging:
                     alert_id = db_execute(
-                        "INSERT INTO Alerts (timestamp, confidence, source, status, details, model_version, camera_id) VALUES (?, ?, ?, ?, ?, ?, ?)",
-                        (datetime.now(), confidence, current_source, 'new', alert_message, '1.0', current_camera_id)
+                        "INSERT INTO Alerts (timestamp, confidence, source, status, details, model_version, camera_id, read, is_false_positive) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                        (datetime.now(), confidence, current_source, 'new', alert_message, '1.0', current_camera_id, 0, 0)
                     )
                     db_execute("INSERT INTO AuditLog (action, details) VALUES (?, ?)", ("alert_detected", f"Alert ID: {alert_id}"))
                     clip_path = capture_clip(alert_id)
@@ -441,15 +441,32 @@ def handle_connect():
         'clip_duration_seconds': CLIP_DURATION,
         'logging_enabled': enable_logging
     })
-    logs = db_fetch("SELECT alert_id, timestamp, details, source, confidence, camera_id FROM Alerts ORDER BY timestamp DESC LIMIT 20")
+    logs = db_fetch("""
+        SELECT a.alert_id, a.timestamp, a.details, a.source, a.confidence, a.camera_id, 
+               CASE WHEN vc.file_path IS NOT NULL THEN '/Uploads/' || vc.file_path ELSE NULL END AS clip_url
+        FROM Alerts a
+        LEFT JOIN VideoClips vc ON a.alert_id = vc.alert_id
+        ORDER BY a.timestamp DESC LIMIT 20
+    """)
     socketio.emit('alert_logs', [{
         'alert_id': row['alert_id'],
         'timestamp': row['timestamp'],
         'details': row['details'],
         'source': row['source'],
         'confidence': float(row['confidence']),
-        'camera_id': row['camera_id']
+        'camera_id': row['camera_id'],
+        'clip_url': row['clip_url']
     } for row in logs])
+
+@socketio.on('clear_alerts')
+def clear_alerts():
+    try:
+        db_execute("DELETE FROM Alerts")
+        db_execute("INSERT INTO AuditLog (action, details) VALUES (?, ?)", ("clear_alerts", "All alerts deleted"))
+        logger.info("All alerts cleared from database")
+    except Exception as e:
+        logger.error(f"Error clearing alerts: {e}")
+        db_execute("INSERT INTO AuditLog (action, details) VALUES (?, ?)", ("clear_alerts_failed", f"Error: {e}"))
 
 @socketio.on('toggle_notifications')
 def toggle_notifications(data):
@@ -573,15 +590,52 @@ def update_alert(data):
         alert_id = data.get('alert_id')
         status = data.get('status')
         notes = data.get('notes', '')
-        if not alert_id or status not in ['new', 'processed', 'dismissed']:
+        read = data.get('read', None)
+        is_false_positive = data.get('is_false_positive', None)
+
+        if not alert_id:
+            logger.error(f"Invalid update_alert data: missing alert_id")
+            db_execute("INSERT INTO AuditLog (action, details) VALUES (?, ?)", ("update_alert_failed", f"Missing alert_id: {data}"))
+            return
+
+        if status == 'dismissed':
+            db_execute("DELETE FROM Alerts WHERE alert_id=?", (alert_id,))
+            db_execute("INSERT INTO AuditLog (action, details) VALUES (?, ?)",
+                       ("dismiss_alert", f"Alert {alert_id} deleted"))
+            logger.info(f"Alert {alert_id} dismissed and deleted")
+            return
+
+        if status not in ['new', 'processed'] or (notes and len(notes) > 500) or \
+           (read is not None and not isinstance(read, bool)) or \
+           (is_false_positive is not None and not isinstance(is_false_positive, bool)):
             logger.error(f"Invalid update_alert data: {data}")
             db_execute("INSERT INTO AuditLog (action, details) VALUES (?, ?)", ("update_alert_failed", f"Invalid data: {data}"))
             return
-        db_execute("UPDATE Alerts SET status=?, notes=?, last_updated=? WHERE alert_id=?",
-                   (status, notes, datetime.now(), alert_id))
-        db_execute("INSERT INTO AuditLog (action, details) VALUES (?, ?)",
-                   ("update_alert", f"Alert {alert_id} updated to {status} with notes: {notes}"))
-        logger.info(f"Alert {alert_id} updated to {status}")
+
+        update_fields = []
+        update_params = []
+        if status:
+            update_fields.append("status=?")
+            update_params.append(status)
+        if notes is not None:
+            update_fields.append("notes=?")
+            update_params.append(notes)
+        if read is not None:
+            update_fields.append("read=?")
+            update_params.append(int(read))
+        if is_false_positive is not None:
+            update_fields.append("is_false_positive=?")
+            update_params.append(int(is_false_positive))
+        update_fields.append("last_updated=?")
+        update_params.append(datetime.now())
+        update_params.append(alert_id)
+
+        if update_fields:
+            query = f"UPDATE Alerts SET {', '.join(update_fields)} WHERE alert_id=?"
+            db_execute(query, tuple(update_params))
+            db_execute("INSERT INTO AuditLog (action, details) VALUES (?, ?)",
+                       ("update_alert", f"Alert {alert_id} updated: status={status}, notes={notes}, read={read}, is_false_positive={is_false_positive}"))
+            logger.info(f"Alert {alert_id} updated: status={status}, read={read}, is_false_positive={is_false_positive}")
     except Exception as e:
         logger.error(f"Error updating alert: {e}")
         db_execute("INSERT INTO AuditLog (action, details) VALUES (?, ?)", ("update_alert_failed", f"Error: {e}"))

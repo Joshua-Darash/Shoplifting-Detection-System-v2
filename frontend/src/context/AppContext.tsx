@@ -1,4 +1,3 @@
-
 import React, { createContext, useContext, useState, useEffect, ReactNode } from 'react';
 import socketService from '@/services/socketService';
 import { toast } from '@/components/ui/use-toast';
@@ -26,6 +25,7 @@ interface AlertLogEntry {
   source: 'webcam' | 'upload';
   confidence: number;
   camera_id?: number | null;
+  clip_url?: string;
 }
 
 type VideoSource = 'webcam' | 'upload' | null;
@@ -44,6 +44,7 @@ export interface Alert {
   notes?: string;
   isFalsePositive?: boolean;
   read?: boolean;
+  clip_url?: string;
 }
 
 interface AppContextType {
@@ -123,6 +124,7 @@ export const AppProvider = ({ children }: { children: ReactNode }) => {
         read: false,
         notes: undefined,
         isFalsePositive: false,
+        clip_url: undefined,
       };
       setAlerts((prev) => [newAlert, ...prev]);
       if (isAudioAlertsEnabled) {
@@ -149,6 +151,7 @@ export const AppProvider = ({ children }: { children: ReactNode }) => {
         read: false,
         notes: undefined,
         isFalsePositive: false,
+        clip_url: log.clip_url ?? undefined,
       }));
       setAlerts((prev) => [...newAlerts, ...prev]);
     });
@@ -243,7 +246,7 @@ export const AppProvider = ({ children }: { children: ReactNode }) => {
     socketService.emit('update_alert', {
       alert_id: alertId,
       status: 'processed',
-      notes: 'Marked as false positive',
+      is_false_positive: true,
     });
   };
 
@@ -258,6 +261,7 @@ export const AppProvider = ({ children }: { children: ReactNode }) => {
     setAlerts((prev) =>
       prev.map((alert) => (alert.id === alertId ? { ...alert, read: true } : alert))
     );
+    socketService.emit('update_alert', { alert_id: alertId, read: true });
   };
 
   return (
