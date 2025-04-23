@@ -334,13 +334,15 @@ def video_processing():
 
 def detection_worker():
     global detection_frame_count
+    last_alert_time = 0
     while True:
         sequence = detection_queue.get()
         if sequence is None:
             break
         try:
             is_shoplifting, confidence = run_model_on_sequence(sequence)
-            if is_shoplifting:
+            current_time = time.time()
+            if is_shoplifting and (current_time - last_alert_time) >= NOTIFICATION_COOLDOWN:
                 with detection_lock:
                     detection_frame_count = 20
                 alert_message = "Suspicious activity detected!"
@@ -368,6 +370,7 @@ def detection_worker():
                             os.remove(clip_path)
                 else:
                     logger.info("Alert detected but logging is paused")
+                last_alert_time = current_time
         except Exception as e:
             logger.error(f"Detection error: {e}")
         finally:
@@ -439,7 +442,8 @@ def handle_connect():
         'sms_enabled': enable_sms_notifications,
         'clip_capture_enabled': enable_clip_capture,
         'clip_duration_seconds': CLIP_DURATION,
-        'logging_enabled': enable_logging
+        'logging_enabled': enable_logging,
+        'cooldown_seconds': NOTIFICATION_COOLDOWN
     })
     logs = db_fetch("""
         SELECT a.alert_id, a.timestamp, a.details, a.source, a.confidence, a.camera_id, 
@@ -497,7 +501,8 @@ def toggle_notifications(data):
             'sms_enabled': enable_sms_notifications,
             'clip_capture_enabled': enable_clip_capture,
             'clip_duration_seconds': CLIP_DURATION,
-            'logging_enabled': enable_logging
+            'logging_enabled': enable_logging,
+            'cooldown_seconds': NOTIFICATION_COOLDOWN
         })
     except Exception as e:
         logger.error(f"Error toggling notifications: {e}")
@@ -526,7 +531,8 @@ def toggle_clip_capture(data):
             'sms_enabled': enable_sms_notifications,
             'clip_capture_enabled': enable_clip_capture,
             'clip_duration_seconds': CLIP_DURATION,
-            'logging_enabled': enable_logging
+            'logging_enabled': enable_logging,
+            'cooldown_seconds': NOTIFICATION_COOLDOWN
         })
     except Exception as e:
         logger.error(f"Error toggling clip capture: {e}")
@@ -553,11 +559,39 @@ def set_clip_duration(data):
             'sms_enabled': enable_sms_notifications,
             'clip_capture_enabled': enable_clip_capture,
             'clip_duration_seconds': CLIP_DURATION,
-            'logging_enabled': enable_logging
+            'logging_enabled': enable_logging,
+            'cooldown_seconds': NOTIFICATION_COOLDOWN
         })
     except Exception as e:
         logger.error(f"Error setting clip duration: {e}")
         db_execute("INSERT INTO AuditLog (action, details) VALUES (?, ?)", ("set_clip_duration_failed", f"Error: {e}"))
+
+@socketio.on('set_cooldown_duration')
+def set_cooldown_duration(data):
+    global NOTIFICATION_COOLDOWN
+    try:
+        cooldown = data.get('cooldown')
+        if not isinstance(cooldown, (int, float)) or cooldown < 0 or cooldown > 300:
+            logger.error(f"Invalid cooldown duration: {cooldown}")
+            db_execute("INSERT INTO AuditLog (action, details) VALUES (?, ?)", ("set_cooldown_failed", f"Invalid cooldown: {cooldown}"))
+            return
+        NOTIFICATION_COOLDOWN = int(cooldown)
+        db_execute("UPDATE Settings SET cooldown_seconds=?, last_updated=? WHERE setting_id=1",
+                   (NOTIFICATION_COOLDOWN, datetime.now()))
+        db_execute("INSERT INTO AuditLog (action, details) VALUES (?, ?)",
+                   ("set_cooldown", f"Cooldown duration set to {NOTIFICATION_COOLDOWN} seconds"))
+        logger.info(f"Cooldown duration updated to {NOTIFICATION_COOLDOWN} seconds")
+        socketio.emit('notification_status', {
+            'email_enabled': enable_email_notifications,
+            'sms_enabled': enable_sms_notifications,
+            'clip_capture_enabled': enable_clip_capture,
+            'clip_duration_seconds': CLIP_DURATION,
+            'logging_enabled': enable_logging,
+            'cooldown_seconds': NOTIFICATION_COOLDOWN
+        })
+    except Exception as e:
+        logger.error(f"Error setting cooldown duration: {e}")
+        db_execute("INSERT INTO AuditLog (action, details) VALUES (?, ?)", ("set_cooldown_failed", f"Error: {e}"))
 
 @socketio.on('capture_snapshot')
 def capture_snapshot():
@@ -660,7 +694,8 @@ def toggle_logging(data):
             'sms_enabled': enable_sms_notifications,
             'clip_capture_enabled': enable_clip_capture,
             'clip_duration_seconds': CLIP_DURATION,
-            'logging_enabled': enable_logging
+            'logging_enabled': enable_logging,
+            'cooldown_seconds': NOTIFICATION_COOLDOWN
         })
     except Exception as e:
         logger.error(f"Error toggling logging: {e}")

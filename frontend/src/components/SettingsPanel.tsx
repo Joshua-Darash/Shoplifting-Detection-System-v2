@@ -1,4 +1,3 @@
-
 import React, { useState } from 'react';
 import { useApp } from '../context/AppContext';
 import { 
@@ -10,8 +9,9 @@ import {
 } from '@/components/ui/dialog';
 import { Switch } from '@/components/ui/switch';
 import { Label } from '@/components/ui/label';
-import { Bell, Mail, Video, PauseCircle } from 'lucide-react';
+import { Bell, Mail, Video, PauseCircle, Clock } from 'lucide-react';
 import { Slider } from '@/components/ui/slider';
+import { useToast } from '@/hooks/use-toast';
 
 interface SettingsPanelProps {
   open: boolean;
@@ -31,8 +31,45 @@ const SettingsPanel = ({ open, onOpenChange }: SettingsPanelProps) => {
     isAlertLoggingPaused,
     setAlertLoggingPaused,
     clipLength,
-    setClipLength
+    setClipLength,
+    cooldownSeconds,
+    setCooldownSeconds
   } = useApp();
+  const { toast } = useToast();
+
+  const handleClipLengthChange = (value: number[]) => {
+    const newValue = value[0];
+    if (newValue < 1 || newValue > 1800) {
+      toast({
+        title: "Invalid Clip Length",
+        description: "Clip length must be between 1 and 1800 seconds.",
+        variant: "destructive"
+      });
+      return;
+    }
+    setClipLength(newValue);
+    toast({
+      title: "Clip Length Updated",
+      description: `Clip length set to ${newValue} seconds.`
+    });
+  };
+
+  const handleCooldownChange = (value: number[]) => {
+    const newValue = value[0];
+    if (newValue < 0 || newValue > 300) {
+      toast({
+        title: "Invalid Cooldown",
+        description: "Cooldown must be between 0 and 300 seconds.",
+        variant: "destructive"
+      });
+      return;
+    }
+    setCooldownSeconds(newValue);
+    toast({
+      title: "Cooldown Updated",
+      description: `Detection cooldown set to ${newValue} seconds.`
+    });
+  };
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
@@ -56,7 +93,13 @@ const SettingsPanel = ({ open, onOpenChange }: SettingsPanelProps) => {
             <Switch
               id="audio-alerts"
               checked={isAudioAlertsEnabled}
-              onCheckedChange={setAudioAlertsEnabled}
+              onCheckedChange={(checked) => {
+                setAudioAlertsEnabled(checked);
+                toast({
+                  title: "Audio Alerts Updated",
+                  description: `Audio alerts ${checked ? 'enabled' : 'disabled'}.`
+                });
+              }}
             />
           </div>
 
@@ -71,7 +114,13 @@ const SettingsPanel = ({ open, onOpenChange }: SettingsPanelProps) => {
             <Switch
               id="email-notifications"
               checked={isEmailNotificationsEnabled}
-              onCheckedChange={setEmailNotificationsEnabled}
+              onCheckedChange={(checked) => {
+                setEmailNotificationsEnabled(checked);
+                toast({
+                  title: "Email Notifications Updated",
+                  description: `Email notifications ${checked ? 'enabled' : 'disabled'}.`
+                });
+              }}
             />
           </div>
 
@@ -86,7 +135,13 @@ const SettingsPanel = ({ open, onOpenChange }: SettingsPanelProps) => {
             <Switch
               id="sms-notifications"
               checked={isSMSNotificationsEnabled}
-              onCheckedChange={setSMSNotificationsEnabled}
+              onCheckedChange={(checked) => {
+                setSMSNotificationsEnabled(checked);
+                toast({
+                  title: "SMS Notifications Updated",
+                  description: `SMS notifications ${checked ? 'enabled' : 'disabled'}.`
+                });
+              }}
             />
           </div>
 
@@ -101,7 +156,13 @@ const SettingsPanel = ({ open, onOpenChange }: SettingsPanelProps) => {
             <Switch
               id="clip-capture"
               checked={isClipCaptureEnabled}
-              onCheckedChange={setClipCaptureEnabled}
+              onCheckedChange={(checked) => {
+                setClipCaptureEnabled(checked);
+                toast({
+                  title: "Clip Capture Updated",
+                  description: `Clip capture ${checked ? 'enabled' : 'disabled'}.`
+                });
+              }}
             />
           </div>
           
@@ -116,7 +177,13 @@ const SettingsPanel = ({ open, onOpenChange }: SettingsPanelProps) => {
             <Switch
               id="pause-logging"
               checked={isAlertLoggingPaused}
-              onCheckedChange={setAlertLoggingPaused}
+              onCheckedChange={(checked) => {
+                setAlertLoggingPaused(checked);
+                toast({
+                  title: "Alert Logging Updated",
+                  description: `Alert logging ${checked ? 'paused' : 'resumed'}.`
+                });
+              }}
             />
           </div>
           
@@ -132,11 +199,32 @@ const SettingsPanel = ({ open, onOpenChange }: SettingsPanelProps) => {
             </div>
             <Slider
               id="clip-length"
-              min={3}
-              max={15}
+              min={1}
+              max={30}
               step={1}
               value={[clipLength]}
-              onValueChange={(value) => setClipLength(value[0])}
+              onValueChange={handleClipLengthChange}
+              className="w-full"
+            />
+          </div>
+
+          {/* Cooldown Adjustment */}
+          <div className="pt-2">
+            <div className="flex items-center space-x-2 mb-2">
+              <Clock className="h-4 w-4 text-muted-foreground" />
+              <Label htmlFor="cooldown" className="flex flex-col">
+                <span>Detection Cooldown (seconds)</span>
+                <span className="text-xs text-muted-foreground">Time between detection events</span>
+              </Label>
+              <span className="ml-auto text-sm font-medium">{cooldownSeconds}s</span>
+            </div>
+            <Slider
+              id="cooldown"
+              min={0}
+              max={300}
+              step={5}
+              value={[cooldownSeconds]}
+              onValueChange={handleCooldownChange}
               className="w-full"
             />
           </div>
@@ -145,9 +233,9 @@ const SettingsPanel = ({ open, onOpenChange }: SettingsPanelProps) => {
             <div className="text-sm text-muted-foreground">
               <p className="mb-1">System Information:</p>
               <ul className="list-disc list-inside space-y-1">
-                <li>Detection Cooldown: 60 seconds</li>
-                <li>Clip Length: {clipLength} seconds ({clipLength * 30} frames)</li>
-                <li>Buffer Status: {isClipCaptureEnabled ? 'Active' : 'Disabled'}</li>
+                <li>Detection Cooldown: {cooldownSeconds} seconds</li>
+                <li>Clip Capture: {isClipCaptureEnabled ? 'Enabled' : 'Disabled'}</li>
+                <li>Clip Length: {clipLength} seconds</li>
                 <li>Alert Logging: {isAlertLoggingPaused ? 'Paused' : 'Active'}</li>
               </ul>
             </div>

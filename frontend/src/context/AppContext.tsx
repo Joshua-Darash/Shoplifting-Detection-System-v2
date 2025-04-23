@@ -9,6 +9,7 @@ interface NotificationStatusEvent {
   clip_capture_enabled: boolean;
   clip_duration_seconds: number;
   logging_enabled: boolean;
+  cooldown_seconds: number;
 }
 
 interface AlertEvent {
@@ -64,6 +65,8 @@ interface AppContextType {
   setAlertLoggingPaused: (paused: boolean) => void;
   clipLength: number;
   setClipLength: (length: number) => void;
+  cooldownSeconds: number;
+  setCooldownSeconds: (seconds: number) => void;
   alerts: Alert[];
   addAlert: (alert: Omit<Alert, 'id' | 'timestamp' | 'read'>) => void;
   clearAlerts: () => void;
@@ -87,6 +90,7 @@ export const AppProvider = ({ children }: { children: ReactNode }) => {
   const [isAudioAlertsEnabled, setAudioAlertsEnabled] = useState(true);
   const [isAlertLoggingPaused, setAlertLoggingPaused] = useState(false);
   const [clipLength, setClipLength] = useState(6);
+  const [cooldownSeconds, setCooldownSeconds] = useState(60);
   const [alerts, setAlerts] = useState<Alert[]>([]);
   const [snapshotDataUrl, setSnapshotDataUrl] = useState<string | null>(null);
   const [status, setStatus] = useState<'offline' | 'online' | 'alert'>('offline');
@@ -107,7 +111,8 @@ export const AppProvider = ({ children }: { children: ReactNode }) => {
       setSMSNotificationsEnabled(data.sms_enabled);
       setClipCaptureEnabled(data.clip_capture_enabled);
       setClipLength(data.clip_duration_seconds);
-      setAlertLoggingPaused(!data.logging_enabled); // Inverse logic
+      setAlertLoggingPaused(!data.logging_enabled);
+      setCooldownSeconds(data.cooldown_seconds);
     });
 
     socketService.on<AlertEvent>('alert', ({ message, confidence, source, camera_id }) => {
@@ -210,6 +215,10 @@ export const AppProvider = ({ children }: { children: ReactNode }) => {
     socketService.emit('toggle_logging', { enabled: !isAlertLoggingPaused });
   }, [isAlertLoggingPaused]);
 
+  useEffect(() => {
+    socketService.emit('set_cooldown_duration', { cooldown: cooldownSeconds });
+  }, [cooldownSeconds]);
+
   const addAlert = (alert: Omit<Alert, 'id' | 'timestamp' | 'read'>) => {
     if (isAlertLoggingPaused) return;
 
@@ -283,6 +292,8 @@ export const AppProvider = ({ children }: { children: ReactNode }) => {
         setAlertLoggingPaused,
         clipLength,
         setClipLength,
+        cooldownSeconds,
+        setCooldownSeconds,
         alerts,
         addAlert,
         clearAlerts,

@@ -1,4 +1,3 @@
-
 import { io, Socket } from 'socket.io-client';
 
 const SOCKET_URL = import.meta.env.DEV ? 'http://localhost:5000' : ''; // Relative path in prod
@@ -18,6 +17,7 @@ interface NotificationStatusEvent {
   clip_capture_enabled: boolean;
   clip_duration_seconds: number;
   logging_enabled: boolean;
+  cooldown_seconds: number;
 }
 
 export interface AlertEvent {
@@ -34,6 +34,7 @@ interface AlertLogEntry {
   source: 'webcam' | 'upload';
   confidence: number;
   camera_id?: number | null;
+  clip_url?: string;
 }
 
 interface SetSourceData {
@@ -54,14 +55,20 @@ interface SetClipDurationData {
   duration: number;
 }
 
+interface SetCooldownDurationData {
+  cooldown: number;
+}
+
 interface ToggleLoggingData {
   enabled: boolean;
 }
 
 interface UpdateAlertData {
   alert_id: string;
-  status: 'new' | 'processed' | 'dismissed';
+  status?: 'new' | 'processed' | 'dismissed';
   notes?: string;
+  read?: boolean;
+  is_false_positive?: boolean;
 }
 
 interface LogErrorData {
