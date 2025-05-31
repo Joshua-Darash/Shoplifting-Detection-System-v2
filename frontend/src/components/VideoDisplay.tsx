@@ -1,4 +1,3 @@
-
 import React, { useRef, useState, useEffect } from 'react';
 import { useApp } from '@/context/AppContext';
 import { toast } from "@/components/ui/use-toast";
@@ -23,8 +22,14 @@ const VideoDisplay = () => {
   const [showSnapshotPreview, setShowSnapshotPreview] = useState(false);
   const [isVideoLoading, setIsVideoLoading] = useState(true);
   const [isTransitioning, setIsTransitioning] = useState(false);
+  const [showSourceSelector, setShowSourceSelector] = useState(false);
 
   useEffect(() => {
+    if (!videoSource) {
+      socketService.emit('set_source', { source: 'webcam' });
+      setVideoSource('webcam');
+    }
+
     socketService.connect();
 
     socketService.on('frame', ({ image }) => {
@@ -43,41 +48,87 @@ const VideoDisplay = () => {
       img.onerror = () => {
         toast({
           title: "Stream Error",
-          description: "Failed to load video frame.",
+          description: "Failed to load video frame. Ensure webcam access is granted.",
           variant: "destructive",
         });
       };
     });
 
-    socketService.on('snapshot', ({ file_path }) => {
-      const snapshotUrl = `/Uploads/${file_path.split('/').pop()}`; // Adjust based on backend static serving
-      setSnapshotDataUrl(snapshotUrl);
-      setShowSnapshotPreview(true);
+    socketService.on('snapshot', async ({ file_path }) => {
+      const snapshotUrl = `http://localhost:5000${file_path}`;
+      try {
+        const response = await fetch(snapshotUrl, { method: 'HEAD' });
+        if (!response.ok) {
+          throw new Error(`HTTP error ${response.status}`);
+        }
+        setSnapshotDataUrl(snapshotUrl);
+        setShowSnapshotPreview(true);
+        toast({
+          title: "Snapshot Captured",
+          description: "Snapshot saved successfully.",
+        });
+      } catch (error) {
+        console.error('Error verifying snapshot URL:', error);
+        toast({
+          title: "Snapshot Load Error",
+          description: `Cannot access snapshot at ${snapshotUrl}. Error: ${error.message}`,
+          variant: "destructive",
+        });
+        setShowSnapshotPreview(false);
+      }
+    });
+
+    socketService.on('snapshot_error', ({ error }) => {
       toast({
-        title: "Snapshot Captured",
-        description: "Snapshot saved successfully.",
+        title: "Snapshot Error",
+        description: error || "Failed to capture snapshot.",
+        variant: "destructive",
       });
+      setShowSnapshotPreview(false);
+    });
+
+    socketService.on('source_updated', ({ source, camera_id }) => {
+      console.log('Source updated:', source, camera_id);
+      setVideoSource(source);
+      setIsVideoLoading(false);
+      setIsTransitioning(false);
+      toast({
+        title: "Source Updated",
+        description: `Video source switched to ${source}.`,
+      });
+    });
+
+    socketService.on('source_error', ({ error }) => {
+      console.error('Source error:', error);
+      toast({
+        title: "Source Error",
+        description: error,
+        variant: "destructive",
+      });
+      setVideoSource('webcam');
+      setIsVideoLoading(false);
+      setIsTransitioning(false);
     });
 
     return () => {
       socketService.disconnect();
     };
-  }, [setSnapshotDataUrl]);
+  }, [setSnapshotDataUrl, setVideoSource, videoSource]);
 
   const handleFileUpload = async (event: React.ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
-    if (!file) return;
-
-    if (!['video/mp4', 'video/avi', 'video/quicktime'].includes(file.type)) {
+    if (!file) {
       toast({
-        title: "Invalid File",
-        description: "Please upload a supported video file (.mp4, .avi, .mov).",
+        title: "No File Selected",
+        description: "Please select a video file to upload.",
         variant: "destructive",
       });
       return;
     }
 
-    if (file.size > 100 * 1024 * 1024) { // 100MB limit
+    console.log('Uploading file:', file.name, 'Type:', file.type, 'Size:', file.size);
+
+    if (file.size > 100 * 1024 * 1024) {
       toast({
         title: "File Too Large",
         description: "Video file must be under 100MB.",
@@ -88,41 +139,58 @@ const VideoDisplay = () => {
 
     setIsVideoLoading(true);
     setIsTransitioning(true);
+    setShowSourceSelector(false);
 
     const formData = new FormData();
     formData.append('video', file);
 
     try {
-      const response = await axios.post('/upload_video', formData, {
+      console.log('Sending upload request to http://localhost:5000/upload_video');
+      const response = await axios.post('http://localhost:5000/upload_video', formData, {
         headers: { 'Content-Type': 'multipart/form-data' },
       });
+      console.log('Upload response:', response.data);
       socketService.emit('set_source', { source: 'upload' });
-      setVideoSource('upload');
       toast({
         title: "Video Uploaded",
         description: response.data.message,
       });
     } catch (error) {
-      console.error('Error uploading video:', error);
+      console.error('Upload error:', error);
+      let errorMessage = "Failed to upload video. Please try again.";
+      if (error.response) {
+        errorMessage = error.response.data.error || errorMessage;
+        console.error('Server response:', error.response.status, error.response.data);
+      } else if (error.request) {
+        errorMessage = "No response from server. Check if the backend is running.";
+        console.error('No server response:', error.request);
+      } else {
+        errorMessage = `Upload error: ${error.message}`;
+      }
       toast({
         title: "Upload Error",
-        description: "Failed to upload video. Please try again.",
+        description: errorMessage,
         variant: "destructive",
       });
-      setVideoSource(null);
-    } finally {
-      setIsVideoLoading(false);
-      setIsTransitioning(false);
+      setVideoSource('webcam');
+      setShowSourceSelector(true);
     }
   };
 
   const handleChangeSource = (source: 'webcam' | 'upload') => {
     setIsTransitioning(true);
+    setShowSourceSelector(false);
     socketService.emit('set_source', { source });
     setVideoSource(source);
     if (source === 'upload') {
       fileInputRef.current?.click();
+    } else {
+      setIsVideoLoading(true);
     }
+  };
+
+  const handleShowSourceSelector = () => {
+    setShowSourceSelector(true);
   };
 
   const handleTakeSnapshot = () => {
@@ -166,12 +234,35 @@ const VideoDisplay = () => {
     }
   };
 
-  const handleSnapshotDownload = () => {
+  const handleSnapshotDownload = async () => {
     if (!snapshotDataUrl) return;
-    const link = document.createElement('a');
-    link.href = snapshotDataUrl;
-    link.download = `snapshot-${new Date().toISOString()}.jpg`;
-    link.click();
+
+    try {
+      const response = await fetch(snapshotDataUrl);
+      if (!response.ok) {
+        throw new Error(`Failed to fetch image: ${response.statusText}`);
+      }
+      const blob = await response.blob();
+      const blobUrl = window.URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = blobUrl;
+      link.download = `snapshot-${new Date().toISOString()}.jpg`;
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+      window.URL.revokeObjectURL(blobUrl);
+      toast({
+        title: "Download Started",
+        description: "The snapshot is downloading.",
+      });
+    } catch (error) {
+      console.error('Error downloading snapshot:', error);
+      toast({
+        title: "Download Error",
+        description: "Failed to download the snapshot. Please try again.",
+        variant: "destructive",
+      });
+    }
   };
 
   const toggleSnapshotFullscreen = () => {
@@ -182,6 +273,15 @@ const VideoDisplay = () => {
     } else {
       document.exitFullscreen().catch(err => console.error('Error exiting fullscreen:', err));
     }
+  };
+
+  const handleSnapshotError = (error: React.SyntheticEvent<HTMLImageElement, Event>) => {
+    toast({
+      title: "Snapshot Load Error",
+      description: "Failed to load snapshot image. The file may not exist or is inaccessible.",
+      variant: "destructive",
+    });
+    setShowSnapshotPreview(false);
   };
 
   return (
@@ -202,7 +302,7 @@ const VideoDisplay = () => {
             </div>
           )}
 
-          {!videoSource && !isTransitioning && (
+          {showSourceSelector && !isTransitioning && (
             <div className="absolute inset-0 flex flex-col items-center justify-center bg-black/80 gap-4">
               <p className="text-lg text-center mb-4">Select a video source to begin monitoring</p>
               <div className="flex gap-3">
@@ -221,13 +321,13 @@ const VideoDisplay = () => {
                   <UploadCloud className="h-4 w-4" />
                   Upload Video
                 </Button>
-                <input
+                {/* <input
                   type="file"
                   ref={fileInputRef}
                   onChange={handleFileUpload}
-                  accept="video/mp4,video/avi,video/quicktime"
+                  accept="video/*"
                   className="hidden"
-                />
+                /> */}
               </div>
             </div>
           )}
@@ -281,6 +381,7 @@ const VideoDisplay = () => {
                   src={snapshotDataUrl}
                   alt="Snapshot"
                   className="max-w-full max-h-[80vh] object-contain rounded"
+                  onError={handleSnapshotError}
                 />
                 <div className="mt-4 flex justify-center">
                   <Button
@@ -298,7 +399,7 @@ const VideoDisplay = () => {
         </div>
       </div>
 
-      {videoSource && !isTransitioning && (
+      {videoSource && !isTransitioning && !showSourceSelector && (
         <div className="mt-3 flex flex-wrap gap-2">
           <Button
             variant={isDetectionActive ? "destructive" : "default"}
@@ -325,7 +426,7 @@ const VideoDisplay = () => {
 
           <Button
             variant="secondary"
-            onClick={() => handleChangeSource(videoSource === 'webcam' ? 'upload' : 'webcam')}
+            onClick={handleShowSourceSelector}
             className="ml-auto"
           >
             Change Source

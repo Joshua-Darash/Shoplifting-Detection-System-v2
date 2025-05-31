@@ -188,8 +188,8 @@ def run_model_on_sequence(sequence):
     sequence_array = np.array(sequence)
     sequence_array = np.expand_dims(sequence_array, axis=0)
     prediction = model.predict(sequence_array)
-    confidence = float(prediction[0][0]) + 0.5
-    return confidence < 1.0, confidence
+    confidence = float(prediction[0][0])
+    return confidence < 0.5, confidence
 
 def capture_clip(alert_id):
     if not enable_clip_capture or len(frame_buffer) < MAX_BUFFER_SIZE:
@@ -279,8 +279,6 @@ def video_processing():
     sequence_buffer = []
     cap = None
     current_cap_source = None
-    vidPath = r"D:\DARASH\Fyr_Pjt\sld-v2\backend\Uploads\testvideo.mp4"
-    uploaded_video_path = vidPath
 
     while True:
         try:
@@ -306,8 +304,6 @@ def video_processing():
                     if cap:
                         cap.release()
                     logger.info("Switching to webcam source")
-                    # vidPath = r"D:\DARASH\Fyr_Pjt\sld-v2\backend\Uploads\Shoplifting_8.mp4"
-                    
                     cap = cv2.VideoCapture(0)
                     if not cap.isOpened():
                         logger.error("Failed to open webcam")
