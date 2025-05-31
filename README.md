@@ -21,3 +21,16 @@ The Shoplifting Detection System is a real-time surveillance solution built with
    ```bash
    git clone https://github.com/Joshua-Darash/Shoplifting-Action-Detection.git
    cd Shoplifting-Action-Detection
+2. **Install enviroment, libraries, and node modules**:
+     - **On the backend, install python enviroment and libraries**
+     - **On the frontend, install npm**
+4. **To test, open two PowerShell terminals**:
+    - **Terminal 1**:
+      ```bash
+      cd backend
+      python app.py
+
+   - **Terminal 2**:
+      ```bash
+      cd frontend
+      npm run dev
